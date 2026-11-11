@@ -64,9 +64,9 @@ boards running this same image are still told apart by
 | Target | CanLinX (STM32C552CET6) |
 | Channels | LIN on UART5, CAN / CAN FD on FDCAN1, both over one composite USB device |
 | Format | Intel HEX, carrying its own load addresses and entry point |
-| Flash range | `0x08000000`-`0x0801122F` (70 192 bytes) |
-| Size on chip | `text 69760` - `data 432` - `bss 48512` |
-| sha256 | `3beb3540b6ed25b6756fd8a8d7bdfae6046935526222f5d6fe86dd9f554c20a1` |
+| Flash range | `0x08000000`-`0x08008BF7` (35 832 bytes) |
+| Size on chip | `text 35408` - `data 424` - `bss 48472` |
+| sha256 | `d80fd051a18c94da61887f66bec56c7fbb2099efddd3978dd30b124bd8149961` |
 
 Built with `arm-none-eabi-gcc` 14.3 from the firmware project (a separate
 repository); this folder carries the built artefact only.
@@ -76,7 +76,7 @@ either way, but an `.elf` built for debugging carries the whole DWARF tree with
 it: absolute source paths from the build machine, every function and struct
 member by name, a map from each instruction back to its source line, and the
 literal text of every macro. None of that is needed to program a board, and it
-is a third of a megabyte of build-machine detail travelling with a 70 KB image.
+is a third of a megabyte of build-machine detail travelling with a 36 KB image.
 Intel HEX carries the addresses and nothing else.
 
 The `.hex` verifies byte for byte against the linked image, and every line
