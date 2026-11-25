@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "canlinxlibusb"
+version = "0.6.0"
+description = "Shared USB handle of the CanLinX vendor interface (CAN + LIN) for canlinxlibcan and canlinxliblin"
+readme = "README.md"
+requires-python = ">=3.9"
+# pyusb needs a libusb backend; on Windows it ships none, so libusb-package
+# carries the DLL.
+dependencies = ["pyusb>=1.2", "libusb-package>=1.0"]
+# Conservative placeholder: no terms are granted until this is decided.
+license = { text = "Proprietary - all rights reserved" }
+
+[tool.setuptools.packages.find]
+include = ["canlinxlibusb*"]
+
+[tool.setuptools.package-data]
+canlinxlibusb = ["py.typed"]

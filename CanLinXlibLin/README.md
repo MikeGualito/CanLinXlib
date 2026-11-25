@@ -1,18 +1,21 @@
 # CanLinXlibLin — Python API for the LIN channel
 
 Python library for the **LIN** channel of a CanLinX USB interface. It turns
-the device's byte protocol into ordinary Python calls: open the port, pick a
+the device's byte protocol into ordinary Python calls: open the board, pick a
 role, send frames, read what happened on the bus.
 
 > The CAN / CAN FD channel of the same board is a **separate library**,
-> [`CanLinXlibCan`](../CanLinXlibCan/README.md). They are independent and can run at
-> the same time: LIN goes through the CDC serial port, CAN through the WinUSB
-> vendor interface. Neither imports the other.
+> [`CanLinXlibCan`](../CanLinXlibCan/README.md). LIN and CAN are two bulk
+> endpoint pairs of the **same WinUSB interface**, and libusb on Windows gives a
+> process a single handle to it, so both libraries get that handle from
+> [`canlinxlibusb`](../CanLinXlibUsb/README.md): they run together in **one
+> process**, but **two processes cannot share a board**. Neither library imports
+> the other.
 
 ```python
 from canlinxliblin import CanLinX, Mode
 
-with CanLinX.open() as lin:          # finds the port by USB VID/PID
+with CanLinX.open() as lin:          # finds the board by USB VID/PID
     lin.reset()                      # known state: IDLE, no schedule, 19200 baud
     lin.mode = Mode.MASTER
     frame = lin.master_send_frame(0x10, b"\x01\x02\x03\x04")
@@ -52,11 +55,14 @@ with CanLinX.open() as lin:          # finds the port by USB VID/PID
 
 ## Install
 
-Requires Python 3.9+ and [pyserial](https://pypi.org/project/pyserial/).
+Requires Python 3.9+, [pyusb](https://pypi.org/project/pyusb/) and
+[libusb-package](https://pypi.org/project/libusb-package/) (the libusb DLL for
+Windows), plus the shared `canlinxlibusb` package of this repository. Windows
+needs no driver: the board declares WinUSB itself.
 
 ```bash
-pip install pyserial
-pip install -e CanLinXlibLin        # optional: makes `import canlinxliblin` work anywhere
+pip install -e CanLinXlibUsb        # the shared USB handle
+pip install -e CanLinXlibLin        # makes `import canlinxliblin` work anywhere
 ```
 
 The package ships type annotations and a `py.typed` marker, so mypy and Pylance
@@ -160,25 +166,26 @@ Runnable examples live in [`examples/`](examples):
 
 ### `CanLinX` — connection
 
-#### `CanLinX.open(port=None, *, serial_number=None, **kwargs) -> CanLinX`
+#### `CanLinX.open(*, serial_number=None, **kwargs) -> CanLinX`
 
-Open a device. With `port=None` it finds the port by USB VID/PID.
+Open a device. It finds the board by USB VID/PID.
 
 ```python
-lin = CanLinX.open()                            # auto-detect
-lin = CanLinX.open("COM7")                      # explicit port
+lin = CanLinX.open()                            # first board found
 lin = CanLinX.open(serial_number="003200386528")  # explicit BOARD
 ```
 
 ⚠️ **With more than one board attached, pass `serial_number`.** They share
-VID/PID, and a COM number is not an identity: Windows can reassign it between
-plug-ins, so the port that was your board last week may be the other one today.
-Each board derives its USB serial from its MCU unique device ID, which is the
-only thing that stays put. Without it, `open()` takes the first port found and
-logs which one it picked.
+VID/PID and the enumeration order is not stable. Each board derives its USB
+serial from its MCU unique device ID, which is the only thing that stays put.
+Without it, `open()` takes the first board found.
 
-Raises [`DeviceNotFound`](#exceptions) if nothing matches or the port cannot be
-opened. Keyword arguments are passed to the constructor:
+If `CanLinXlibCan` already holds that board in the same process, the handle is
+shared. If **another process** holds it, `open()` raises `CanLinXError`: libusb
+on Windows gives one handle to the interface.
+
+Raises [`DeviceNotFound`](#exceptions) if nothing matches. Keyword arguments are
+passed to the constructor:
 
 | Argument | Default | Meaning |
 |---|---|---|
@@ -186,24 +193,19 @@ opened. Keyword arguments are passed to the constructor:
 | `on_event` | `None` | callable invoked for every bus event (see [Threading model](#threading-model)) |
 | `event_queue_size` | `4096` | bus events buffered for `read_event()` |
 
-#### `CanLinX.find_ports(vid=0x0483, pid=0x5710, serial_number=None) -> list[str]`
+#### `CanLinX.list_devices() -> list[str]`
 
-Every port matching the CanLinX VID/PID, optionally narrowed to one board by its
-USB serial.
-
-#### `CanLinX.list_devices(vid=0x0483, pid=0x5710) -> list[tuple[str, str]]`
-
-`(port, serial_number)` for every attached board — use it to find out which
-serial to pass to `open()`.
+The USB serial of every attached board — use it to find out which serial to
+pass to `open()`.
 
 ```python
 >>> CanLinX.list_devices()
-[('COM12', '003200386528'), ('COM14', '009600536528')]
+['003200386528', '009600536528']
 ```
 
 > A board whose LIN transceiver is not fitted still enumerates, still reports a
 > serial, and still answers `ping()` and `loopback()` — it just never sees
-> anything on the bus. Do not read "the port is there" as "the LIN hardware is
+> anything on the bus. Do not read "the board is there" as "the LIN hardware is
 > there".
 
 #### `close()` / context manager
@@ -674,10 +676,10 @@ All derive from `CanLinXError`.
 
 | Exception | Raised when |
 |---|---|
-| `DeviceNotFound` | no device matches the VID/PID, or the port cannot be opened |
+| `DeviceNotFound` | no device matches the VID/PID, or none has the requested serial |
 | `CommandRejected` | the device answered NACK. `.command` says which command; the message includes the usual reasons |
 | `ResponseTimeout` | no reply within `timeout` |
-| `LinkError` | the serial link failed or was closed mid-call |
+| `LinkError` | the USB link failed or was closed mid-call |
 
 Bad arguments raise plain `ValueError` **before** anything is sent (bad
 identifier, 0 or >8 data bytes, out-of-range baud rate, oversized schedule).
@@ -819,7 +821,7 @@ with CanLinX.open(on_event=log) as lin:
 
 ## Threading model
 
-- A **daemon reader thread** owns the serial port for reading and runs from
+- A **daemon reader thread** owns the LIN IN endpoint for reading and runs from
   construction to `close()`.
 - `on_event` is called **on that thread**, before the event is queued. Keep it
   short — print, append, put on a queue. Exceptions in it are logged and
@@ -909,9 +911,11 @@ listens should poll one of those, since it may not issue a command for minutes.
 
 ## Troubleshooting
 
-**`DeviceNotFound`** — the device is not enumerated, or another program holds
-the port. Check `CanLinX.find_ports()`, and Device Manager for a COM port under
-VID `0483` / PID `5710`.
+**`DeviceNotFound`** — the device is not enumerated. Check
+`CanLinX.list_devices()`, and Device Manager for a "CanLinX USB Device" under
+VID `0483` / PID `5710`. If it enumerates but cannot be opened, **another
+process holds it** (libusb on Windows gives one handle to the interface): close
+any other script, python-can bus or test suite using CAN or LIN.
 
 **`ping()` works but nothing appears on the bus** — the USB side is fine and the
 LIN side is not. In order: LIN supply (VBAT/VSUP) and the bus pull-up; the
@@ -948,7 +952,7 @@ python tests/test_offline.py     # the API against a simulated firmware
 
 Both run offline: the first checks the framing layer against known values (CRC
 check value, PID parity, escaping, a decoder fed deliberately dirty streams);
-the second drives the full API against a fake serial port that answers like the
+the second drives the full API against a fake USB link that answers like the
 firmware, covering reply matching, event routing and the reader thread.
 
 ---

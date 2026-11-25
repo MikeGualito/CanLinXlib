@@ -1,7 +1,7 @@
 """
 Embedded schedule table: periodic headers with firmware timing.
 
-Run:  python examples/03_schedule.py [COM7]
+Run:  python examples/03_schedule.py [SERIAL]
 
 The scheduler runs inside the MCU, so its cadence does not depend on USB or on
 host scheduling. Measure periods with the frame timestamps (captured in the
@@ -14,13 +14,14 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "CanLinXlibUsb"))
 
 from canlinxliblin import CanLinX, LinFrame, Mode  # noqa: E402
 
-port = sys.argv[1] if len(sys.argv) > 1 else None
+serial = sys.argv[1] if len(sys.argv) > 1 else None
 SLOTS = [(0x10, 30), (0x11, 30)]  # (id, pause after the slot, in ms) -> ~60 ms per id
 
-with CanLinX.open(port) as lin:
+with CanLinX.open(serial_number=serial) as lin:
     lin.reset()
     # Slots only send headers. Registering responses here makes this node
     # publish the data too, so the frames come back with payload.

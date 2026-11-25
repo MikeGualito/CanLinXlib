@@ -14,9 +14,10 @@ Everything on the wire is little-endian.
 from __future__ import annotations
 
 # --- USB identity -----------------------------------------------------------
-# The vendor interface of the composite device. CDC (the LIN channel) owns
-# interfaces 0 and 1, so the CAN interface is number 2 -- a classic source of
-# confusion when writing host code.
+# The vendor interface of the composite device. The PwrSup CDC owns interfaces 0
+# and 1, so the vendor interface is number 2 -- a classic source of confusion
+# when writing host code. CAN uses its bulk pair (0x83 / 0x02); LIN uses the
+# other one (0x84 / 0x03) of the same interface.
 CANLINX_VID = 0x0483
 CANLINX_PID = 0x5710
 VENDOR_INTERFACE = 2

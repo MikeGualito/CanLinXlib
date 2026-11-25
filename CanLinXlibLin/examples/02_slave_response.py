@@ -1,7 +1,7 @@
 """
 Slave mode: answer headers sent by another node.
 
-Run:  python examples/02_slave_response.py [COM7]
+Run:  python examples/02_slave_response.py [SERIAL]
 
 The first part registers a response and leaves the device listening, which is
 what you want with a real master on the bus.
@@ -17,14 +17,15 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "CanLinXlibUsb"))
 
 from canlinxliblin import CanLinX, Mode  # noqa: E402
 
-port = sys.argv[1] if len(sys.argv) > 1 else None
+serial = sys.argv[1] if len(sys.argv) > 1 else None
 SLAVE_ID = 0x11
 RESPONSE = bytes([0xDE, 0xAD, 0xBE, 0xEF])
 
-with CanLinX.open(port) as lin:
+with CanLinX.open(serial_number=serial) as lin:
     lin.reset()
     lin.slave_set_response(SLAVE_ID, RESPONSE)
 

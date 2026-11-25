@@ -1,7 +1,7 @@
 """
 UDS diagnostics over LIN: TesterPresent and Extended Session.
 
-Run:  python examples/06_uds_diagnostics.py [COM7] [--nad 0x64] [--baud 19230]
+Run:  python examples/06_uds_diagnostics.py [SERIAL] [--nad 0x64] [--baud 19230]
       python examples/06_uds_diagnostics.py --keep-alive 30   # hold the session
 
 Requires a real LIN slave ECU on the bus. This device acts as the master: it
@@ -53,6 +53,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "CanLinXlibUsb"))
 
 from canlinxliblin import Checksum, CanLinX, LinFrame, Mode  # noqa: E402
 
@@ -274,7 +275,7 @@ def describe_session_response(response: bytes) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("---")[0])
-    parser.add_argument("port", nargs="?", help="COM port (auto-detected if omitted)")
+    parser.add_argument("serial", nargs="?", help="USB serial of the board (first one found if omitted)")
     parser.add_argument("--nad", type=lambda s: int(s, 0), default=DEFAULT_NAD,
                         help=f"ECU node address (default 0x{DEFAULT_NAD:02X})")
     parser.add_argument("--baud", type=int, default=DEFAULT_BAUDRATE,
@@ -286,8 +287,8 @@ def main() -> int:
                         help="print every diagnostic frame in hex")
     args = parser.parse_args()
 
-    with CanLinX.open(args.port) as lin:
-        print(f"master on {lin.port}, {args.baud} baud, ECU NAD 0x{args.nad:02X}")
+    with CanLinX.open(serial_number=args.serial) as lin:
+        print(f"master on {lin.serial_number}, {args.baud} baud, ECU NAD 0x{args.nad:02X}")
         lin.reset()
         lin.set_baudrate(args.baud)
         lin.mode = Mode.MASTER

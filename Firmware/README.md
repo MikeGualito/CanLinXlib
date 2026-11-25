@@ -11,8 +11,8 @@ Firmware/
 ```
 
 `CanLinXlibLin` and `CanLinXlibCan` need a board already running this image. Without
-it there is nothing to enumerate: no CDC COM port for LIN, no WinUSB interface
-for CAN.
+it there is nothing to enumerate: no WinUSB interface for CAN and LIN, no
+PwrSup COM port.
 
 ## Flashing
 

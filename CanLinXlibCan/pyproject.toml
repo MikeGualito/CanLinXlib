@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "canlinxlibcan"
-version = "0.5.0"
+version = "0.6.0"
 description = "Python API for the CAN / CAN FD channel of a CanLinX USB interface"
 readme = "README.md"
 requires-python = ">=3.9"
 # pyusb needs a libusb backend; on Windows it ships none, so libusb-package
 # carries the DLL. python-can is NOT a dependency: this library talks gs_usb
 # directly, which is what makes CAN FD reachable.
-dependencies = ["pyusb>=1.2", "libusb-package>=1.0"]
+dependencies = ["canlinxlibusb>=0.6", "pyusb>=1.2", "libusb-package>=1.0"]
 # Conservative placeholder: no terms are granted until this is decided.
 license = { text = "Proprietary - all rights reserved" }
 

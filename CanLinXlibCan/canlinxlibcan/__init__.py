@@ -16,9 +16,10 @@ python-can needs is CLASSIC ONLY, so CAN FD is unreachable through it even
 though this firmware does FD with BRS up to 64 bytes. For classic-only work
 python-can remains a perfectly good choice -- see the README.
 
-The LIN channel of the same board is a separate library, CanLinXlibLin. They are
-independent and can run at the same time: CAN goes through the WinUSB vendor
-interface and LIN through the CDC serial port.
+The LIN channel of the same board is a separate library, CanLinXlibLin. CAN and
+LIN are two bulk pairs of the same WinUSB interface and the two libraries share
+one handle (canlinxlibusb), so they can run together in ONE process; two
+processes cannot share the board.
 """
 
 from .bittiming import (
@@ -41,7 +42,7 @@ from .protocol import (
     TEST_MODE_INTERNAL, TEST_MODE_MONITOR, TEST_MODE_NORMAL,
 )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 __all__ = [
     "CanLinXlibCan",

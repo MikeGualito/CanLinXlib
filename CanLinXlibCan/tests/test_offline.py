@@ -23,6 +23,8 @@ import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..",
+                                "CanLinXlibUsb"))
 
 import usb.core   # noqa: E402
 import usb.util   # noqa: E402
@@ -32,6 +34,7 @@ from canlinxlibcan import (  # noqa: E402
 )
 from canlinxlibcan.errors import TransferError  # noqa: E402
 from canlinxlibcan import device as devmod  # noqa: E402
+from canlinxlibusb import device as usbmod  # noqa: E402
 from canlinxlibcan import protocol as P     # noqa: E402
 from canlinxlibcan.framing import (  # noqa: E402
     BtConst, BtConstExt, DeviceConfig, parse_frame,
@@ -261,7 +264,7 @@ class SlowBusDevice(FakeDevice):
 
 
 def install_fake(dev):
-    devmod.find_devices = lambda: [dev]
+    usbmod.find_devices = lambda: [dev]
     usb.util.claim_interface = lambda d, i: None
     usb.util.release_interface = lambda d, i: None
     usb.util.dispose_resources = lambda d: None
@@ -479,7 +482,7 @@ def main() -> int:
     slow.stop()
 
     print("== no device ==")
-    devmod.find_devices = lambda: []
+    usbmod.find_devices = lambda: []
     try:
         CanLinXlibCan().open()
         ok("a missing device raises DeviceNotFound", False)

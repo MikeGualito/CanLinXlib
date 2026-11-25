@@ -18,7 +18,7 @@ class CanLinXError(Exception):
 
 
 class DeviceNotFound(CanLinXError):
-    """No CanLinX device is enumerated (or the given port does not exist)."""
+    """No CanLinX device is enumerated (or none has the given USB serial)."""
 
 
 class ResponseTimeout(CanLinXError):
@@ -27,7 +27,7 @@ class ResponseTimeout(CanLinXError):
 
 class LinkError(CanLinXError):
     """
-    The serial link failed or was closed while a call was in flight.
+    The USB link failed or was closed while a call was in flight.
 
     Typically the device was unplugged. **There is no automatic reconnection**:
     once the link is gone the reader thread stops and every later call raises

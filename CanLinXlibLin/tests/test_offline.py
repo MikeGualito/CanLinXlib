@@ -3,7 +3,7 @@ Offline test of the device layer, against a simulated firmware.
 
 Run:  python tests/test_offline.py        (no hardware, no pyserial needed)
 
-A fake serial port implements enough of the firmware's behaviour -- ACK/NACK
+A fake USB link implements enough of the firmware's behaviour -- ACK/NACK
 per command, mode preconditions, the slave response table, the transceiver echo
 that turns your own transmission into a received frame -- to exercise the parts
 of :mod:`canlinxliblin.device` that are easy to break: reply matching, event routing,
@@ -21,7 +21,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "CanLinXlibUsb"))
 
+from canlinxlibusb import LIN_EP_IN, LIN_EP_OUT
 from canlinxliblin import framing
 from canlinxliblin.protocol import (
     GOTO_SLEEP_DATA,
@@ -41,12 +43,13 @@ def check(condition: bool, label: str) -> None:
         FAILURES.append(label)
 
 
-class FakeSerial:
-    """A stand-in for ``serial.Serial`` that answers like the CanLinX firmware."""
+class FakeLink:
+    """A stand-in for the shared USB handle that answers like the CanLinX firmware."""
 
-    def __init__(self, port: str, baudrate: int = 0, timeout: float = 0.02) -> None:
-        self.port = port
-        self.is_open = True
+    serial_number = "SIMULATED"
+
+    def __init__(self) -> None:
+        self.released = False
         self._out = bytearray()
         self._decoder = framing.StreamDecoder()
         self._lock = threading.Lock()
@@ -58,23 +61,23 @@ class FakeSerial:
         self.last_checksum: dict[int, int] = {}  # frame_id -> checksum type sent
 
     # --- host -> device --------------------------------------------------
-    def write(self, data: bytes) -> int:
+    def write(self, endpoint: int, data: bytes, timeout_ms: int) -> int:
+        assert endpoint == LIN_EP_OUT, hex(endpoint)
         for frame in self._decoder.feed(data):
             self._handle(frame.cmd, frame.payload)
         return len(data)
 
-    def flush(self) -> None:
-        pass
-
     # --- device -> host --------------------------------------------------
-    def read(self, size: int) -> bytes:
+    def read(self, endpoint: int, size: int, timeout_ms: int) -> bytes:
+        assert endpoint == LIN_EP_IN, hex(endpoint)
+        assert size % 64 == 0, "WinUSB rejects bulk reads that are not a multiple of 64"
         time.sleep(0.005)  # stand in for the USB poll interval
         with self._lock:
             chunk, self._out = bytes(self._out[:size]), self._out[size:]
         return chunk
 
-    def close(self) -> None:
-        self.is_open = False
+    def release(self) -> None:
+        self.released = True
 
     # --- firmware behaviour ---------------------------------------------
     def _push(self, cmd: int, payload: bytes = b"") -> None:
@@ -176,17 +179,21 @@ class FakeSerial:
             self._ack(cmd, False)
 
 
-class _FakeSerialModule:
-    Serial = FakeSerial
+class _FakeShared:
+    """Stands in for ``SharedDevice``: hands out the simulated firmware."""
 
-    class SerialException(Exception):
-        pass
+    last: FakeLink | None = None
+
+    @staticmethod
+    def acquire(serial: str | None = None) -> FakeLink:
+        _FakeShared.last = FakeLink()
+        return _FakeShared.last
 
 
 def main() -> int:
     import canlinxliblin.device as device_module
 
-    device_module.serial = _FakeSerialModule  # type: ignore[assignment]
+    device_module.SharedDevice = _FakeShared  # type: ignore[assignment]
 
     from canlinxliblin import (
         CommandRejected,
@@ -200,7 +207,7 @@ def main() -> int:
     print("CanLinX device-layer test (simulated firmware)")
     events: list = []
 
-    with CanLinX("FAKE1", on_event=events.append) as lin:
+    with CanLinX(FakeLink(), on_event=events.append) as lin:
         check(lin.ping(), "ping() completes a loopback round trip")
 
         status = lin.reset()
@@ -330,7 +337,7 @@ def main() -> int:
         )
 
         # --- per-identifier checksum default, checked on the wire -----------
-        device: FakeSerial = lin._serial  # type: ignore[assignment]
+        device: FakeLink = lin._link  # type: ignore[assignment]
         lin.master_send_frame(0x3C, b"\x64\x02\x3e\x00\xff\xff\xff\xff", wait=0)
         lin.master_send_frame(0x20, b"\x01\x02", wait=0)
         check(

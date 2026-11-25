@@ -23,6 +23,11 @@ from typing import Iterator, Optional
 import usb.core
 import usb.util
 
+from canlinxlibusb import (
+    SharedDevice, UsbBackendMissing, UsbDeviceBusy, UsbDeviceNotFound,
+    find_devices, list_serials,
+)
+
 from .bittiming import TimingSolution, solve
 from .errors import (
     BackendMissing, ChannelStateError, DeviceBusy, DeviceNotFound,
@@ -41,9 +46,8 @@ from .protocol import (
     GS_USB_BREQ_BT_CONST, GS_USB_BREQ_BT_CONST_EXT,
     GS_USB_BREQ_DATA_BITTIMING, GS_USB_BREQ_DEVICE_CONFIG,
     GS_USB_BREQ_GET_STATE, GS_USB_BREQ_HOST_FORMAT, GS_USB_BREQ_MODE,
-    GS_USB_BREQ_TIMESTAMP, ISO_NAMES, CANLINX_PID, CANLINX_VID, LEC_NAMES,
-    STATE_NAMES, STBY_AWAKE, TEST_MODE_DEFAULT, VENDOR_INTERFACE,
-    feature_names,
+    GS_USB_BREQ_TIMESTAMP, ISO_NAMES, LEC_NAMES,
+    STATE_NAMES, STBY_AWAKE, TEST_MODE_DEFAULT, feature_names,
 )
 
 # Bulk reads MUST be a multiple of the 64-byte wMaxPacketSize: WinUSB rejects
@@ -52,42 +56,6 @@ from .protocol import (
 # frame (80 bytes), which arrives as 64+16.
 _READ_SIZE = 128
 
-_REQ_OUT = usb.util.CTRL_OUT | usb.util.CTRL_TYPE_VENDOR | usb.util.CTRL_RECIPIENT_INTERFACE
-_REQ_IN = usb.util.CTRL_IN | usb.util.CTRL_TYPE_VENDOR | usb.util.CTRL_RECIPIENT_INTERFACE
-
-
-def _backend():
-    """A libusb backend, from libusb-package if pyusb has none of its own."""
-    from usb.backend import libusb1
-    be = libusb1.get_backend()
-    if be is not None:
-        return be
-    try:
-        import libusb_package
-        be = libusb_package.get_libusb1_backend()
-    except ImportError as exc:
-        raise BackendMissing(
-            "pyusb found no libusb backend and libusb-package is not "
-            "installed. Run: pip install libusb-package") from exc
-    if be is None:
-        raise BackendMissing("libusb-package provided no usable backend")
-    return be
-
-
-def find_devices() -> list:
-    """Every CanLinX device currently attached."""
-    return list(usb.core.find(find_all=True, idVendor=CANLINX_VID,
-                              idProduct=CANLINX_PID, backend=_backend()))
-
-
-def _serial_of(dev) -> str:
-    """The device's USB serial, or "" when it cannot be read right now."""
-    try:
-        return dev.serial_number or ""
-    except (usb.core.USBError, NotImplementedError, ValueError):
-        return ""
-
-
 def list_devices() -> list:
     """Return the USB serial number of every CanLinX board attached.
 
@@ -95,7 +63,7 @@ def list_devices() -> list:
     what tells two of them apart: VID/PID are identical and the enumeration
     order is not stable. Pass the one you want as `CanLinXlibCan(serial=...)`.
     """
-    return [_serial_of(dev) for dev in find_devices()]
+    return list_serials()
 
 
 class CanLinXlibCan:
@@ -107,10 +75,11 @@ class CanLinXlibCan:
             bus.send(CanMessage(0x123, b"\\x01\\x02"))
             msg = bus.recv(timeout=1.0)
 
-    ONE HANDLE AT A TIME. libusb on Windows will not give a second handle to
+    ONE PROCESS AT A TIME. libusb on Windows will not give a second handle to
     the WinUSB interface, so no other process (and no python-can bus) may hold
-    the CAN channel while this is open. The LIN channel is independent: it goes
-    through the CDC serial port and can run at the same time.
+    the board while this is open. The LIN channel rides the same interface and
+    shares the handle (canlinxlibusb): CanLinXlibCan and canlinxliblin can run
+    together inside ONE process.
     """
 
     def __init__(self,
@@ -153,6 +122,7 @@ class CanLinXlibCan:
         self.receive_own_messages = receive_own_messages
         self._serial = serial
 
+        self._shared: Optional[SharedDevice] = None
         self._dev = None
         self._started = False
         self._ctrl_lock = threading.Lock()
@@ -188,39 +158,17 @@ class CanLinXlibCan:
         if self._dev is not None:
             return self
 
-        devices = find_devices()
-        if not devices:
-            raise DeviceNotFound(
-                f"no CanLinX device ({CANLINX_VID:04x}:{CANLINX_PID:04x}). "
-                "Is it plugged in, and did WinUSB bind to interface 2?")
-        if self._serial is not None:
-            # Reading the serial is a live control transfer, and it throws for a
-            # device whose vendor interface Windows has not finished binding to
-            # WinUSB -- which happens for seconds after a board with a new
-            # serial is first plugged in. Skip such a device instead of letting
-            # the exception escape: a board that cannot be identified is not the
-            # one that was asked for, and crashing here hides the boards that
-            # ARE ready.
-            attached = [(d, _serial_of(d)) for d in devices]
-            devices = [d for d, s in attached if s == self._serial]
-            if not devices:
-                seen = ", ".join(repr(s) if s else "<unreadable>"
-                                 for _, s in attached) or "none"
-                raise DeviceNotFound(
-                    f"no CanLinX with serial {self._serial!r}; attached: {seen}. "
-                    "An <unreadable> entry usually means Windows is still "
-                    "binding that device to WinUSB -- retry in a few seconds.")
-        dev = devices[0]
-
+        # The handle is shared with the LIN library of this process: opening
+        # the interface here would leave LIN with nothing to open.
         try:
-            usb.util.claim_interface(dev, VENDOR_INTERFACE)
-        except usb.core.USBError as exc:
-            raise DeviceBusy(
-                "could not claim the CAN interface. libusb on Windows gives "
-                "only ONE handle to it: close any other script using the CAN "
-                "channel (a python-can bus, docs/gs_usb_test.py, a --burst "
-                f"left running). Original error: {exc}") from exc
-        self._dev = dev
+            self._shared = SharedDevice.acquire(self._serial)
+        except UsbDeviceNotFound as exc:
+            raise DeviceNotFound(str(exc)) from exc
+        except UsbDeviceBusy as exc:
+            raise DeviceBusy(str(exc)) from exc
+        except UsbBackendMissing as exc:
+            raise BackendMissing(str(exc)) from exc
+        self._dev = self._shared.dev
 
         try:
             # A run that ended badly leaves the channel started, and bit timing
@@ -302,14 +250,8 @@ class CanLinXlibCan:
             except Exception:
                 pass
             self._started = False
-            try:
-                usb.util.release_interface(self._dev, VENDOR_INTERFACE)
-            except Exception:
-                pass
-            try:
-                usb.util.dispose_resources(self._dev)
-            except Exception:
-                pass
+            self._shared.release()
+            self._shared = None
             self._dev = None
 
     def __enter__(self) -> "CanLinXlibCan":
@@ -323,14 +265,11 @@ class CanLinXlibCan:
     def _ctrl_out(self, request: int, payload: bytes = b"",
                   value: int = 0) -> None:
         with self._ctrl_lock:
-            self._dev.ctrl_transfer(_REQ_OUT, request, value,
-                                    VENDOR_INTERFACE, payload, 1000)
+            self._shared.ctrl_out(request, payload, value)
 
     def _ctrl_in(self, request: int, length: int, value: int = 0) -> bytes:
         with self._ctrl_lock:
-            return bytes(self._dev.ctrl_transfer(_REQ_IN, request, value,
-                                                 VENDOR_INTERFACE, length,
-                                                 1000))
+            return self._shared.ctrl_in(request, length, value)
 
     def _set_mode(self, mode: int, flags: int) -> None:
         from .framing import DeviceMode

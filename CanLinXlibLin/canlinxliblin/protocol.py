@@ -10,15 +10,11 @@ from __future__ import annotations
 from enum import IntEnum, IntFlag
 
 # --------------------------------------------------------------------------
-# USB identity of the CDC ACM (LIN) interface of the composite device
+# USB identity of the board. LIN is the bulk pair 0x84 IN / 0x03 OUT of the WinUSB
+# vendor interface (interface 2), the same interface that carries CAN.
 # --------------------------------------------------------------------------
 USB_VID = 0x0483
 USB_PID = 0x5710
-
-#: Baud rate used on the host side of the virtual COM port. It is meaningless
-#: for a CDC ACM link (there is no real UART between host and MCU), but
-#: pyserial requires a value.
-HOST_SERIAL_BAUDRATE = 921600
 
 # --------------------------------------------------------------------------
 # Byte framing (PPP/HDLC-like): 0x7E LEN CMD PAYLOAD... CRC8 0x7E

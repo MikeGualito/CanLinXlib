@@ -8,16 +8,21 @@ One board, two channels, two independent libraries:
 | | [`CanLinXlibLin`](CanLinXlibLin/README.md) | [`CanLinXlibCan`](CanLinXlibCan/README.md) |
 |---|---|---|
 | Bus | LIN | Classic CAN and **CAN FD** |
-| USB transport | CDC ACM (virtual COM port) | WinUSB vendor interface (gs_usb) |
+| USB transport | WinUSB vendor interface, bulk pair `0x84` / `0x03` | WinUSB vendor interface, bulk pair `0x83` / `0x02` (gs_usb) |
 | Import | `from canlinxliblin import CanLinX, Mode` | `from canlinxlibcan import CanLinXlibCan, CanMessage` |
-| Dependency | `pyserial` | `pyusb`, `libusb-package` |
+| Dependency | `canlinxlibusb` (`pyusb`, `libusb-package`) | `canlinxlibusb` (`pyusb`, `libusb-package`) |
 | Driver setup | none | none — WinUSB binds by WCID, no Zadig |
 
-They are **fully independent**: neither imports the other, they share no state,
-and they can run in the same process or in two separate scripts at the same
-time. The split follows the hardware — the two channels are two different USB
-interfaces with two different host stacks, and merging them would force every
-LIN user to install a USB backend they never touch.
+Neither imports the other. CAN and LIN are two bulk endpoint pairs of the
+**same WinUSB interface**, and libusb on Windows gives a process a single handle
+to it, so both libraries get that handle from the small shared package
+[`canlinxlibusb`](CanLinXlibUsb/README.md):
+
+- **CAN and LIN run together in ONE process.** Open both from the same script.
+- **Two processes cannot share a board.** The second one fails with
+  `DeviceBusy` (CAN) or `CanLinXError` (LIN).
+- The board's only COM port is **PwrSup** (supply control), bound to the
+  standard serial driver, so any process can use it meanwhile.
 
 ---
 
@@ -30,6 +35,7 @@ CanLinXlib/
 │   ├── examples/        6 runnable examples
 │   ├── tests/           offline test suite (simulated firmware)
 │   └── README.md        full API reference
+├── CanLinXlibUsb/          shared USB handle (canlinxlibusb), used by both
 ├── CanLinXlibCan/          CAN / CAN FD channel
 │   ├── canlinxlibcan/      package (device, framing, protocol, bittiming, message)
 │   ├── examples/        6 runnable examples
@@ -51,7 +57,8 @@ Both libraries need a board already running the image in
 Python 3.9+.
 
 ```bash
-pip install -e CanLinXlibLin        # LIN  -> pulls pyserial
+pip install -e CanLinXlibUsb        # the shared USB handle (needed by both)
+pip install -e CanLinXlibLin        # LIN
 pip install -e CanLinXlibCan        # CAN  -> pulls pyusb + libusb-package
 ```
 
@@ -65,8 +72,8 @@ device, the bit timing read back from the registers, and a frame round trip:
 py CanLinXlibCan/examples/00_preflight.py
 ```
 
-> The board also shows up as a COM port. That is the **LIN** channel, and it
-> says nothing about whether the CAN interface bound to WinUSB correctly.
+> The board also shows up as a COM port. That is **PwrSup**, not CAN or LIN, and
+> it says nothing about whether the vendor interface bound to WinUSB correctly.
 
 ---
 
@@ -81,7 +88,7 @@ from canlinxlibcan import CanLinXlibCan, list_devices
 from canlinxliblin import CanLinX
 
 list_devices()                 # ['003200386528', '009600536528']
-CanLinX.list_devices()         # [('COM12', '00320...'), ('COM14', '00960...')]
+CanLinX.list_devices()         # the same list: ['003200386528', '009600536528']
 
 # The ORDER is whatever enumeration returned -- never index by position,
 # match on the serial.
@@ -91,7 +98,7 @@ lin = CanLinX.open(serial_number="003200386528")
 ```
 
 ⚠️ A board reports its serial and answers on both channels **whether or not its
-LIN transceiver is fitted**. The USB side does not depend on it, so "the port is
+LIN transceiver is fitted**. The USB side does not depend on it, so "the board is
 there" does not mean "the LIN hardware is there".
 
 ---
@@ -103,7 +110,7 @@ there" does not mean "the LIN hardware is there".
 ```python
 from canlinxliblin import CanLinX, Mode
 
-with CanLinX.open() as lin:              # finds the port by USB VID/PID
+with CanLinX.open() as lin:              # finds the board by USB VID/PID
     lin.reset()                          # known state: IDLE, no schedule, 19200 baud
     lin.mode = Mode.MASTER
     print(lin.master_send_frame(0x10, b"\x01\x02\x03\x04"))
@@ -151,7 +158,7 @@ drive this channel.
 Both READMEs document these in full, with the measurement behind each one. The
 short version, because they are the failures that look like something else:
 
-- **LIN — the device remembers.** Closing the COM port does not deconfigure USB,
+- **LIN — the device remembers.** Closing the library does not deconfigure USB,
   so mode, schedule and slave responses survive across runs. Start every script
   with `lin.reset()`.
 - **LIN — checksum flavour is per identifier and fails silently.** `0x3C`/`0x3D`
@@ -172,7 +179,7 @@ short version, because they are the failures that look like something else:
   A run where nobody acknowledged leaves the node at `tx_err = 128`; check
   `get_state()` when a session starts behaving oddly.
 - **Both — two boards are told apart ONLY by their USB serial.** They share
-  VID/PID and their COM numbers move between plug-ins. `CanLinXlibCan.list_devices()`
+  VID/PID and the enumeration order is not stable. `CanLinXlibCan.list_devices()`
   and `CanLinX.list_devices()` report what is attached.
 
 ---
@@ -200,7 +207,9 @@ runs do that.
 
 ## Status
 
-Version 0.5.0 for both packages, matching firmware 0.5.0. The firmware reports
+Version 0.6.0 for the three packages. They need the firmware that carries CAN
+and LIN on the WinUSB interface; the 0.5.0 image has LIN on a COM port and does
+not work with them. The firmware reports
 its version in the `gs_usb` device configuration (`sw_version`, packed as
 `major << 16 | minor << 8 | patch`), and `CanLinXlibCan` shows it decoded.
 

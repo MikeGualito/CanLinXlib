@@ -1,10 +1,11 @@
 """
 High-level interface to the CanLinX LIN channel.
 
-The device exposes LIN over a USB CDC ACM interface (a virtual COM port); this
-module turns that byte stream into ordinary Python calls. A background thread
-reads the port continuously, so bus events are never missed while your code is
-doing something else.
+The device exposes LIN on a bulk endpoint pair of its WinUSB vendor interface
+(the same interface that carries CAN, so the handle is shared with
+CanLinXlibCan through canlinxlibusb); this module turns that byte stream into
+ordinary Python calls. A background thread reads the endpoint continuously, so
+bus events are never missed while your code is doing something else.
 """
 
 from __future__ import annotations
@@ -18,6 +19,13 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, Iterator, Sequence
 
+import usb.core
+
+from canlinxlibusb import (
+    LIN_EP_IN, LIN_EP_OUT, SharedDevice, UsbBackendMissing, UsbDeviceBusy,
+    UsbDeviceNotFound, list_serials,
+)
+
 from . import framing
 from .errors import CommandRejected, DeviceNotFound, CanLinXError, LinkError, ResponseTimeout
 from .events import BusEvent, HeaderOnly, LinFrame, SleepRequested, Status, UartRegisters
@@ -27,15 +35,12 @@ from .protocol import (
     BAUDRATE_MIN,
     DEFAULT_BAUDRATE,
     DIAGNOSTIC_FRAME_IDS,
-    HOST_SERIAL_BAUDRATE,
     MASTER_REQUEST_ID,
     MAX_DATA_LEN,
     MAX_FRAME_ID,
     MAX_PAYLOAD,
     MAX_SCHEDULE_ENTRIES,
     MIN_DATA_LEN,
-    USB_PID,
-    USB_VID,
     Checksum,
     Command,
     Event,
@@ -44,14 +49,13 @@ from .protocol import (
     is_goto_sleep,
 )
 
-try:  # pyserial is only needed to talk to real hardware
-    import serial
-    import serial.tools.list_ports as list_ports
-except ImportError:  # pragma: no cover
-    serial = None  # type: ignore[assignment]
-    list_ports = None  # type: ignore[assignment]
-
 log = logging.getLogger(__name__)
+
+# Bulk reads must be a multiple of the 64-byte wMaxPacketSize: WinUSB rejects
+# anything else. The device sends at most 63 bytes per transfer.
+_READ_SIZE = 64
+_READ_TIMEOUT_MS = 50
+_WRITE_TIMEOUT_MS = 1000
 
 __all__ = ["CanLinX", "ScheduleEntry", "Stats"]
 
@@ -109,12 +113,16 @@ class CanLinX:
 
     Always :meth:`reset` at the start of a script unless you deliberately want
     to inherit state: mode, schedule table and slave responses survive closing
-    the COM port, because closing a port does not deconfigure USB.
+    the library, because closing a handle does not deconfigure USB.
+
+    CAN rides the same USB interface: ``CanLinXlibCan`` and this class can be
+    open at the same time in ONE process (they share the handle through
+    ``canlinxlibusb``). Another process cannot open the board meanwhile.
     """
 
     def __init__(
         self,
-        port: str,
+        link: SharedDevice,
         *,
         timeout: float = 1.0,
         on_event: Callable[[BusEvent], None] | None = None,
@@ -122,8 +130,10 @@ class CanLinX:
         event_queue_size: int = 4096,
     ) -> None:
         """
-        :param port: COM port / tty of the CDC ACM interface (``CanLinX.open()``
-            finds it for you).
+        :param link: the shared USB handle of the board
+            (``SharedDevice.acquire()``; ``CanLinX.open()`` does it for you).
+            This object takes over the reference and gives it back on
+            :meth:`close`.
         :param timeout: default seconds to wait for a command reply.
         :param on_event: called for **every** bus event, from the reader thread,
             before it is queued. Keep it short; exceptions in it are logged and
@@ -136,15 +146,12 @@ class CanLinX:
             When it overflows the oldest event is dropped and
             :attr:`stats`\\ ``.events_dropped`` counts it.
         """
-        if serial is None:  # pragma: no cover
-            raise CanLinXError("pyserial is required to talk to a device: pip install pyserial")
-
         self.timeout = timeout
         self.on_event = on_event
         self.on_sleep_requested = on_sleep_requested
         self.stats = Stats()
 
-        self._serial = serial.Serial(port, baudrate=HOST_SERIAL_BAUDRATE, timeout=0.02)
+        self._link = link
         self._decoder = StreamDecoder()
         self._events: queue.Queue[tuple[float, BusEvent]] = queue.Queue(event_queue_size)
         self._replies: queue.Queue[RawFrame] = queue.Queue()
@@ -166,68 +173,48 @@ class CanLinX:
     # Discovery / lifecycle
     # ------------------------------------------------------------------
     @staticmethod
-    def find_ports(vid: int = USB_VID, pid: int = USB_PID,
-                   serial_number: str | None = None) -> list[str]:
-        """Return every serial port matching the CanLinX VID/PID, in system order.
+    def list_devices() -> list[str]:
+        """Return the USB serial number of every CanLinX board attached.
 
-        :param serial_number: keep only the board with this USB serial. Every
-            board reports one derived from its MCU's unique device ID, which is
-            the only thing that tells two CanLinX boards apart -- VID/PID and
-            the COM port number do not (the latter can change between plug-ins).
-            Use :meth:`list_devices` to see which serials are attached.
+        Every board reports one derived from its MCU's unique device ID, which is
+        the only thing that tells two CanLinX boards apart -- VID/PID are
+        identical and the enumeration order is not stable. Pass the one you want
+        as ``CanLinX.open(serial_number=...)``.
         """
-        if list_ports is None:  # pragma: no cover
-            raise CanLinXError("pyserial is required to enumerate ports: pip install pyserial")
-        return [p.device for p in list_ports.comports()
-                if p.vid == vid and p.pid == pid
-                and (serial_number is None or p.serial_number == serial_number)]
-
-    @staticmethod
-    def list_devices(vid: int = USB_VID, pid: int = USB_PID) -> list[tuple[str, str]]:
-        """Return ``(port, serial_number)`` for every CanLinX board attached."""
-        if list_ports is None:  # pragma: no cover
-            raise CanLinXError("pyserial is required to enumerate ports: pip install pyserial")
-        return [(p.device, p.serial_number or "")
-                for p in list_ports.comports() if p.vid == vid and p.pid == pid]
+        return list_serials()
 
     @classmethod
-    def open(cls, port: str | None = None, *, serial_number: str | None = None,
-             **kwargs) -> "CanLinX":
+    def open(cls, *, serial_number: str | None = None, **kwargs) -> "CanLinX":
         """
-        Open a device, auto-detecting the port when it is not given.
+        Open a device.
 
         :param serial_number: pick the board with this USB serial instead of the
             first one found. Required to be deterministic once more than one
             board is plugged in.
-        :raises DeviceNotFound: nothing matching the CanLinX VID/PID is present.
+        :raises DeviceNotFound: nothing matching the CanLinX VID/PID is present,
+            or no board has that serial.
+        :raises CanLinXError: another process holds the board (libusb on Windows
+            gives one handle), or no libusb backend is available.
         """
-        if port is None:
-            ports = cls.find_ports(serial_number=serial_number)
-            if not ports:
-                extra = (f" with serial {serial_number!r}"
-                         if serial_number is not None else "")
-                raise DeviceNotFound(
-                    f"no CanLinX device found{extra} (looking for VID 0x{USB_VID:04X} "
-                    f"PID 0x{USB_PID:04X}); is it plugged in and enumerated?"
-                )
-            if len(ports) > 1:
-                log.info("several CanLinX devices found (%s), using %s; "
-                         "pass serial_number= to choose", ports, ports[0])
-            port = ports[0]
         try:
-            return cls(port, **kwargs)
-        except Exception as exc:  # pyserial raises SerialException
-            if serial is not None and isinstance(exc, serial.SerialException):
-                raise DeviceNotFound(f"cannot open {port}: {exc}") from exc
+            link = SharedDevice.acquire(serial_number)
+        except UsbDeviceNotFound as exc:
+            raise DeviceNotFound(str(exc)) from exc
+        except (UsbDeviceBusy, UsbBackendMissing) as exc:
+            raise CanLinXError(str(exc)) from exc
+        try:
+            return cls(link, **kwargs)
+        except Exception:
+            link.release()
             raise
 
     def close(self) -> None:
         """
-        Stop the reader thread and close the port. Safe to call twice.
+        Stop the reader thread and give the USB handle back. Safe to call twice.
 
         This does not reset the device: mode, schedule and slave responses stay
-        as they are, because closing a port does not deconfigure USB. Unplugging
-        it does, and that *is* what makes the firmware drop them.
+        as they are, because closing the library does not deconfigure USB.
+        Unplugging it does, and that *is* what makes the firmware drop them.
 
         An instance is not reusable after closing -- there is no reconnect;
         construct a new one.
@@ -237,7 +224,7 @@ class CanLinX:
         self._stop.set()
         self._reader.join(timeout=2.0)
         try:
-            self._serial.close()
+            self._link.release()
         except Exception:  # pragma: no cover - closing must never raise
             pass
 
@@ -248,8 +235,9 @@ class CanLinX:
         self.close()
 
     @property
-    def port(self) -> str:
-        return self._serial.port
+    def serial_number(self) -> str:
+        """USB serial of the board this instance talks to."""
+        return self._link.serial_number
 
     @property
     def is_open(self) -> bool:
@@ -257,13 +245,12 @@ class CanLinX:
         Whether the device is still usable.
 
         False after :meth:`close`, and also once the reader thread has hit a
-        link failure -- pyserial's own ``is_open`` can stay True after the
-        hardware disappears, so that alone is not a reliable signal.
+        link failure (the board was unplugged).
         """
-        return not self._stop.is_set() and self._link_error is None and self._serial.is_open
+        return not self._stop.is_set() and self._link_error is None
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return f"<CanLinX {self.port} mode={self._mode.name} baud={self._baudrate}>"
+        return f"<CanLinX {self.serial_number} mode={self._mode.name} baud={self._baudrate}>"
 
     # ------------------------------------------------------------------
     # Reader thread
@@ -271,7 +258,9 @@ class CanLinX:
     def _reader_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                chunk = self._serial.read(256)
+                chunk = bytes(self._link.read(LIN_EP_IN, _READ_SIZE, _READ_TIMEOUT_MS))
+            except usb.core.USBTimeoutError:
+                continue          # nothing arrived within the poll interval
             except Exception as exc:
                 if not self._stop.is_set():
                     self._link_error = exc
@@ -339,7 +328,7 @@ class CanLinX:
 
     def _check_link(self) -> None:
         if self._link_error is not None:
-            raise LinkError(f"serial link failed: {self._link_error}")
+            raise LinkError(f"USB link failed: {self._link_error}")
         if self._stop.is_set():
             raise LinkError("device is closed")
 
@@ -349,8 +338,11 @@ class CanLinX:
     def _write(self, data: bytes) -> None:
         self._check_link()
         with self._write_lock:
-            self._serial.write(data)
-            self._serial.flush()
+            try:
+                self._link.write(LIN_EP_OUT, data, _WRITE_TIMEOUT_MS)
+            except usb.core.USBError as exc:
+                self._link_error = exc
+                raise LinkError(f"USB link failed: {exc}") from exc
         self.stats.bytes_tx += len(data)
 
     def _wait_reply(self, match: Callable[[RawFrame], bool], timeout: float, what: str) -> RawFrame:

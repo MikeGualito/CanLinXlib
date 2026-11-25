@@ -5,7 +5,9 @@ Python API for the **CAN / CAN FD** channel of a CanLinX USB interface.
 > The LIN channel of the same board is a **separate library**,
 > [`CanLinXlibLin`](../CanLinXlibLin/README.md). They are independent and can run at
 > the same time: CAN goes through the WinUSB vendor interface, LIN through the
-> CDC serial port. Neither imports the other.
+> same WinUSB interface (separate bulk endpoint pair), sharing one USB handle
+> through [`canlinxlibusb`](../CanLinXlibUsb/README.md). Neither imports the
+> other.
 
 ---
 
@@ -48,8 +50,8 @@ dependency.
 
 On Windows the CAN channel is interface 2 of the composite device and must be
 bound to **WinUSB**, which happens automatically by WCID — no driver install
-and no Zadig. The board also appears as a COM port; that is the LIN channel and
-says nothing about whether the CAN interface bound correctly.
+and no Zadig. The board also appears as a COM port; that is PwrSup, not CAN or
+LIN, and says nothing about whether the vendor interface bound correctly.
 
 Run this first, always:
 
@@ -95,8 +97,8 @@ libusb on Windows gives exactly **one** handle to the WinUSB interface. A second
 fails with `DeviceBusy` — and if you force it, libusb can throw an access
 violation while cleaning up. Close one before opening the other.
 
-The **LIN channel is not affected**: it is a serial port, so `CanLinXlibLin` and
-`CanLinXlibCan` run happily side by side.
+Inside ONE process, `CanLinXlibLin` and `CanLinXlibCan` share the handle
+(`canlinxlibusb`) and run happily side by side.
 
 ### 2. The echo carries no payload
 
@@ -225,7 +227,7 @@ means **nothing** goes out at all, not merely some frames.
 | `sample_point` | `None` | nominal sample point as a fraction; `None` uses 87.5% |
 | `data_sample_point` | `None` | data-phase sample point; `None` uses 83.33% |
 
-Two boards share VID/PID and their COM numbers move between plug-ins, so
+Two boards share VID/PID and the enumeration order is not stable, so
 `serial` is the only stable way to choose one. Each board derives its serial
 from its MCU unique device ID; `list_devices()` reports what is attached.
 

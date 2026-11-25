@@ -1,7 +1,7 @@
 """
 Master mode: publish a frame and poll a slave.
 
-Run:  python examples/01_master_frame.py [COM7]
+Run:  python examples/01_master_frame.py [SERIAL]
 
 With no second ECU on the bus you still see your own frame come back: the LIN
 transceiver echoes to RX everything it transmits, so the device reports its own
@@ -13,13 +13,14 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "CanLinXlibUsb"))
 
 from canlinxliblin import HeaderOnly, CanLinX, Mode  # noqa: E402
 
-port = sys.argv[1] if len(sys.argv) > 1 else None
+serial = sys.argv[1] if len(sys.argv) > 1 else None
 
-with CanLinX.open(port) as lin:
-    print(f"connected on {lin.port}")
+with CanLinX.open(serial_number=serial) as lin:
+    print(f"connected to {lin.serial_number}")
     lin.reset()
     lin.mode = Mode.MASTER
 
